@@ -1,0 +1,13 @@
+#!/bin/bash
+#SBATCH --partition=testgpu       ### queue to submit to
+#SBATCH --job-name=gcn    ### job name
+#SBATCH --output=gcn.out   ### file in which to store job stdout
+#SBATCH --error=gcn.err    ### file in which to store job stderr
+#SBATCH --time=100                ### wall-clock time limit, in minutes
+#SBATCH --mem=100M              ### memory limit, per cpu, in MB
+#SBATCH --nodes=1               ### number of nodes to use
+#SBATCH --ntasks-per-node=1     ### number of tasks to launch per node
+#SBATCH --cpus-per-task=1       ### number of cores for each task
+#SBATCH --gres=gpu:1
+ 
+bash train_gcn.sh 0

@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "train.py", line 93, in <module>
+    emb_matrix = np.load(emb_file)
+  File "/projects/aimlab/apouranb/torch/numpy/lib/npyio.py", line 433, in load
+    pickle_kwargs=pickle_kwargs)
+  File "/projects/aimlab/apouranb/torch/numpy/lib/format.py", line 698, in read_array
+    array.shape = shape
+ValueError: cannot reshape array of size 0 into shape (53953,300)
