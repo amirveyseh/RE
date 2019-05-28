@@ -12,8 +12,6 @@ import math
 from model.tree import Tree, head_to_tree, tree_to_adj
 from utils import constant, torch_utils
 
-from .ON_LSTM import ONLSTMStack
-
 class GCNClassifier(nn.Module):
     """ A wrapper classifier for GCNRelationModel. """
     def __init__(self, opt, emb_matrix=None):
@@ -30,9 +28,9 @@ class GCNClassifier(nn.Module):
         self.gcn_model.clipEmbedding()
 
     def forward(self, inputs):
-        outputs, pooling_output, att, dist, positive, negative = self.gcn_model(inputs)
+        outputs, pooling_output, newAdj, oldAdj = self.gcn_model(inputs)
         logits = self.classifier(outputs)
-        return logits, pooling_output, att, dist, positive, negative
+        return logits, pooling_output, newAdj, oldAdj
 
 class GCNRelationModel(nn.Module):
     def __init__(self, opt, emb_matrix=None):
@@ -58,10 +56,6 @@ class GCNRelationModel(nn.Module):
         for _ in range(self.opt['mlp_layers']-1):
             layers += [nn.Linear(opt['hidden_dim'], opt['hidden_dim']), nn.ReLU()]
         self.out_mlp = nn.Sequential(*layers)
-
-        self.disc = nn.Sequential(nn.Linear(opt['hidden_dim']*4*2*2, opt['hidden_dim']*4*2*2), nn.Tanh(),
-                                  nn.Linear(opt['hidden_dim']*4*2*2, opt['hidden_dim']*4*2*2), nn.Tanh(),
-                                  nn.Linear(opt['hidden_dim']*4*2*2,1), nn.Sigmoid())
 
     def init_embeddings(self):
         if self.emb_matrix is None:
@@ -98,27 +92,21 @@ class GCNRelationModel(nn.Module):
             adj = torch.from_numpy(adj)
             return Variable(adj.cuda()) if self.opt['cuda'] else Variable(adj)
 
-        # adj = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data)
-        h, pool_mask, h2, h0, dist, att = self.gcn(None, inputs)
+        adj = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data)
+        h, pool_mask, newAdj, h0 = self.gcn(adj, inputs)
         # h, pool_mask = self.gcn(None, inputs)
 
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2) # invert mask
         pool_type = self.opt['pooling']
         h_out = pool(h, pool_mask, type=pool_type)
-        h_out2 = pool(h2, pool_mask, type=pool_type)
         subj_out = pool(h, subj_mask, type=pool_type)
-        subj_out2 = pool(h2, subj_mask, type=pool_type)
         subj_out_h0 = pool(h0, subj_mask, type=pool_type)
         obj_out = pool(h, obj_mask, type=pool_type)
-        obj_out2 = pool(h2, obj_mask, type=pool_type)
         obj_out_h0 = pool(h0, obj_mask, type=pool_type)
         outputs = torch.cat([h_out, subj_out, obj_out, subj_out_h0, obj_out_h0], dim=1)
-        outputs2 = torch.cat([h_out2, subj_out2, obj_out2], dim=1)
-        positive = self.disc(torch.cat([outputs, outputs2], dim=1))
-        negative = self.disc(torch.cat([outputs, outputs2[torch.randperm(outputs2.shape[0])]], dim=1))
         outputs = self.out_mlp(outputs)
-        return outputs, h_out, att, dist, positive, negative
+        return outputs, h_out, newAdj, adj.view(adj.shape[0], adj.shape[1]*adj.shape[2])
 
 class GCN(nn.Module):
     """ A GCN/Contextualized GCN module operated on dependency graphs. """
@@ -137,7 +125,6 @@ class GCN(nn.Module):
             input_size = self.in_dim
             self.rnn = nn.LSTM(input_size, opt['rnn_hidden'], opt['rnn_layers'], batch_first=True, \
                     dropout=opt['rnn_dropout'], bidirectional=True)
-            self.rnn2 = ONLSTMStack([self.in_dim, opt['rnn_hidden'] * 2, opt['rnn_hidden'] * 2], 5)
             self.in_dim = opt['rnn_hidden'] * 2
             self.rnn_drop = nn.Dropout(opt['rnn_dropout']) # use on last layer output
 
@@ -155,9 +142,9 @@ class GCN(nn.Module):
         self.Q = nn.Linear(opt['rnn_hidden'] * 2, 2 * opt['rnn_hidden'])
         self.V = nn.Linear(opt['rnn_hidden'] * 2, 2 * opt['rnn_hidden'])
 
-        # self.ff1 = nn.Linear(4 * opt['rnn_hidden'], 2 * opt['rnn_hidden'])
-        # self.ff2 = nn.Linear(2 * opt['rnn_hidden'], 2 * opt['rnn_hidden'])
-        # self.ffl = nn.Linear(2 * opt['rnn_hidden'], 1)
+        self.ff1 = nn.Linear(4 * opt['rnn_hidden'], 2 * opt['rnn_hidden'])
+        self.ff2 = nn.Linear(2 * opt['rnn_hidden'], 2 * opt['rnn_hidden'])
+        self.ffl = nn.Linear(2 * opt['rnn_hidden'], 1)
 
         self.W_q = nn.Linear(2 * self.in_dim, self.in_dim)
         self.W_c = nn.Linear(2 * self.in_dim, self.in_dim)
@@ -196,18 +183,6 @@ class GCN(nn.Module):
         # rnn layer
         if self.opt.get('rnn', False):
             gcn_inputs = self.rnn_drop(self.encode_with_rnn(embs, masks, words.size()[0]))
-            rnn_outputs, _, _, _, dist = self.rnn2(embs.transpose(0,1), self.rnn2.init_hidden(embs.shape[0]))
-            dist = dist[0][-1]
-            dist = dist.transpose(0,1)
-            # rnn_outputs = rnn_outputs[0]
-            rnn_outputs = rnn_outputs.transpose(0,1)
-            #
-            # print((-torch.log(dist) * dist).sum(1).mean())
-            #
-            # dist = dist.masked_fill(masks, 2)
-            # created_adj = create_adj(dist.data.cpu().numpy())
-            # adj = created_adj.float()
-            onlstm_output = rnn_outputs.float()
         else:
             gcn_inputs = embs
         
@@ -249,18 +224,16 @@ class GCN(nn.Module):
         value = self.V(gcn_inputs)
 
         sf2 = nn.Softmax(2)
-        att = sf2(key.bmm(query.transpose(1,2))) / math.sqrt(self.opt['rnn_hidden'] * 2)
-        att = att.masked_fill(torch.eye(att.shape[1],att.shape[2]).byte().cuda(), 0).sum(2)
         output = sf2(key.bmm(query.transpose(1,2)) / math.sqrt(self.opt['rnn_hidden'] * 2)).bmm(value)
         output = m * output
 
-        # h1 = output.repeat(1, output.shape[1], 1)
-        # h2 = output.repeat(1, 1, output.shape[1]).view(output.shape[0], output.shape[1]*output.shape[1], output.shape[2])
-        # h = torch.cat([h1,h2], dim=2)
-        # h = torch.sigmoid(self.ffl(self.ff2(self.ff1(h)))).squeeze()
+        h1 = output.repeat(1, output.shape[1], 1)
+        h2 = output.repeat(1, 1, output.shape[1]).view(output.shape[0], output.shape[1]*output.shape[1], output.shape[2])
+        h = torch.cat([h1,h2], dim=2)
+        h = torch.sigmoid(self.ffl(self.ff2(self.ff1(h)))).squeeze()
 
 
-        return output, masks.unsqueeze(2), onlstm_output, gcn_inputs, dist, att
+        return output, masks.unsqueeze(2), h, gcn_inputs
 
 def pool(h, mask, type='max'):
     if type == 'max':

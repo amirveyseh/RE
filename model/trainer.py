@@ -26,6 +26,8 @@ class Trainer(object):
 
     def load(self, filename):
         try:
+            if 'checkpoint' in filename:
+                filename = filename[:-14]
             checkpoint = torch.load(filename)
         except BaseException:
             print("Cannot load model from {}".format(filename))
@@ -80,7 +82,7 @@ class GCNTrainer(Trainer):
         # step forward
         self.model.train()
         self.optimizer.zero_grad()
-        logits, pooling_output, att, dist, positive, negative = self.model(inputs)
+        logits, pooling_output, newAdj, oldAdj = self.model(inputs)
         loss = self.criterion(logits, labels)
         # l2 decay on all conv layers
         if self.opt.get('conv_l2', 0) > 0:
@@ -88,11 +90,7 @@ class GCNTrainer(Trainer):
         # l2 penalty on output representations
         if self.opt.get('pooling_l2', 0) > 0:
             loss += self.opt['pooling_l2'] * (pooling_output ** 2).sum(1).mean()
-        mi_label = Variable(torch.cat([torch.tensor(np.ones(positive.shape)).float(), torch.tensor(np.zeros(negative.shape)).float()], dim=0)).cuda()
-        loss += self.bc(torch.cat([positive, negative], dim=0), mi_label)
-        kl = (torch.log(att / dist) * att).sum(1).mean()
-        entropy = -(torch.log(att) * att).sum(1).mean()
-        loss += kl
+        loss += self.opt['adj_l2'] * self.bc(newAdj, oldAdj)
         loss_val = loss.item()
         # backward
         loss.backward()
@@ -106,7 +104,7 @@ class GCNTrainer(Trainer):
         orig_idx = batch[11]
         # forward
         self.model.eval()
-        logits, _, _, _, _, _ = self.model(inputs)
+        logits, _, _, _ = self.model(inputs)
         loss = self.criterion(logits, labels)
         probs = F.softmax(logits, 1).data.cpu().numpy().tolist()
         predictions = np.argmax(logits.data.cpu().numpy(), axis=1).tolist()
